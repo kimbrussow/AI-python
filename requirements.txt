@@ -1,0 +1,2 @@
+assemblyai>=1.0.0
+sounddevice>=0.4.6

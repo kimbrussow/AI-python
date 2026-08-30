@@ -7,6 +7,7 @@ turns on their own line.
 """
 
 import argparse
+import contextlib
 import os
 import queue
 import signal
@@ -14,8 +15,7 @@ import sys
 import threading
 import time
 import wave
-from datetime import datetime
-from typing import Iterator, Optional
+from collections.abc import Iterator
 
 import sounddevice as sd
 from assemblyai.streaming.v3 import (
@@ -30,45 +30,14 @@ from assemblyai.streaming.v3 import (
     TurnEvent,
 )
 
-PREFERRED_SAMPLE_RATE = 16000
+from audio_io import list_devices, pick_sample_rate, resolve_device
+
 BLOCK_MS = 50
 
-audio_queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
+audio_queue: queue.Queue[bytes | None] = queue.Queue()
 stop_event = threading.Event()
 transcript_file = None
 printed_partial = False
-
-
-def list_devices() -> None:
-    print(sd.query_devices())
-
-
-def resolve_device(device: Optional[str]) -> Optional[int]:
-    if device is None:
-        return None
-    try:
-        return int(device)
-    except ValueError:
-        pass
-    matches = [
-        index
-        for index, info in enumerate(sd.query_devices())
-        if device.lower() in info["name"].lower() and info["max_input_channels"] > 0
-    ]
-    if not matches:
-        raise SystemExit(f"No input device matching {device!r}. Run with --list-devices.")
-    return matches[0]
-
-
-def pick_sample_rate(device: Optional[int]) -> int:
-    """16 kHz keeps bandwidth low, but many USB mics only run at 44.1/48 kHz."""
-    for rate in (PREFERRED_SAMPLE_RATE, 48000, 44100, 32000, 8000):
-        try:
-            sd.check_input_settings(device=device, channels=1, samplerate=rate, dtype="int16")
-            return rate
-        except Exception:
-            continue
-    raise SystemExit("Microphone does not support any usable sample rate.")
 
 
 def on_begin(client: RealTimeTranscriber, event: BeginEvent) -> None:
@@ -83,7 +52,7 @@ def on_turn(client: RealTimeTranscriber, event: TurnEvent) -> None:
         print(f"\r\033[K{event.transcript}", flush=True)
         printed_partial = False
         if transcript_file:
-            transcript_file.write(f"{datetime.now():%H:%M:%S} {event.transcript}\n")
+            transcript_file.write(f"{time.strftime('%H:%M:%S')} {event.transcript}\n")
             transcript_file.flush()
     else:
         print(f"\r\033[K… {event.transcript}", end="", flush=True)
@@ -166,8 +135,11 @@ def main() -> None:
         sample_rate = args.sample_rate or pick_sample_rate(device)
     blocksize = int(sample_rate * BLOCK_MS / 1000)
 
+    exit_stack = contextlib.ExitStack()
     if args.save:
-        transcript_file = open(args.save, "a", encoding="utf-8")
+        transcript_file = exit_stack.enter_context(
+            open(args.save, "a", encoding="utf-8")  # noqa: SIM115 — closed by the stack
+        )
 
     client = RealTimeTranscriber(
         RealTimeTranscriberOptions(terminate_timeout=10.0),
@@ -208,8 +180,7 @@ def main() -> None:
                 client.stream(audio_chunks())
     finally:
         client.disconnect(terminate=True)
-        if transcript_file:
-            transcript_file.close()
+        exit_stack.close()
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ from tts import BACKENDS, Speaker, TTSError
 from wake_word import DEFAULT_PHRASE, DEFAULT_THRESHOLD, WakeWordDetector
 
 BLOCK_MS = 50
+TERMINATE_TIMEOUT_S = 60.0
 ACKNOWLEDGEMENT = "Yes?"
 EXIT_WORDS = ("goodbye", "good bye", "stop listening", "shut down", "go to sleep")
 RESPONSE_TIMEOUT_S = 15
@@ -184,7 +185,7 @@ class Assistant:
 
 def build_client(api_key: str, args: argparse.Namespace, detector: WakeWordDetector, rate: int):
     client = RealTimeTranscriber(
-        RealTimeTranscriberOptions(terminate_timeout=10.0),
+        RealTimeTranscriberOptions(terminate_timeout=TERMINATE_TIMEOUT_S),
         api_key=api_key,
     )
     parameters = RealTimeParameters(

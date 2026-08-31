@@ -33,6 +33,7 @@ from assemblyai.streaming.v3 import (
 from audio_io import list_devices, pick_sample_rate, resolve_device
 
 BLOCK_MS = 50
+TERMINATE_TIMEOUT_S = 60.0
 
 audio_queue: queue.Queue[bytes | None] = queue.Queue()
 stop_event = threading.Event()
@@ -142,7 +143,7 @@ def main() -> None:
         )
 
     client = RealTimeTranscriber(
-        RealTimeTranscriberOptions(terminate_timeout=10.0),
+        RealTimeTranscriberOptions(terminate_timeout=TERMINATE_TIMEOUT_S),
         api_key=api_key,
     )
     client.on(RealTimeEvents.Begin, on_begin)

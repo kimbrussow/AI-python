@@ -1,4 +1,4 @@
-"""Text-level wake word detection over AssemblyAI transcripts.
+"""Text-level wake word detection over streaming transcripts.
 
 Recognition happens server-side, so the wake word is matched on the returned text
 rather than on raw audio: no extra model, no extra CPU on the Pi. Matching is fuzzy
@@ -66,7 +66,7 @@ class WakeWordDetector:
                 raise ValueError(f"Wake phrase {phrase!r} contains no usable words.")
 
     def keyterms(self) -> list[str]:
-        """Wake phrases as AssemblyAI keyterms, to bias recognition toward them."""
+        """Wake phrases as recognition keyterms, to bias the model toward them."""
         return [phrase for phrase, _ in self._phrases]
 
     def detect(self, transcript: str) -> Detection | None:

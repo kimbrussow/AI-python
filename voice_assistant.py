@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Wake-word voice loop for a Raspberry Pi 5: USB mic in, USB speaker out.
 
-Audio is captured from a USB microphone with sounddevice and streamed to AssemblyAI's
-Universal-Streaming API. Every finalized turn is checked for the wake phrase; the words
-that follow it are the command, answered out loud through a USB speaker.
+Audio is captured from a USB microphone with sounddevice and streamed to Deepgram
+Nova-3 (or AssemblyAI with ``--provider assemblyai``). Every finalized turn is checked
+for the wake phrase; the words that follow it are the command, answered out loud
+through a USB speaker.
 
     ./.venv/bin/python voice_assistant.py --device USB --speaker USB
 
@@ -15,7 +16,6 @@ wake word and audio plumbing stay independent of what the assistant actually say
 """
 
 import argparse
-import os
 import queue
 import signal
 import subprocess
@@ -24,24 +24,13 @@ import threading
 import time
 
 import sounddevice as sd
-from assemblyai.streaming.v3 import (
-    BeginEvent,
-    Encoding,
-    RealTimeError,
-    RealTimeEvents,
-    RealTimeParameters,
-    RealTimeTranscriber,
-    RealTimeTranscriberOptions,
-    TerminationEvent,
-    TurnEvent,
-)
 
 from audio_io import list_devices, pick_sample_rate, resolve_device
+from stt import PROVIDERS, Turn, build_transcriber
 from tts import BACKENDS, Speaker, TTSError
 from wake_word import DEFAULT_PHRASE, DEFAULT_THRESHOLD, WakeWordDetector
 
 BLOCK_MS = 50
-TERMINATE_TIMEOUT_S = 60.0
 ACKNOWLEDGEMENT = "Yes?"
 EXIT_WORDS = ("goodbye", "good bye", "stop listening", "shut down", "go to sleep")
 RESPONSE_TIMEOUT_S = 15
@@ -183,22 +172,6 @@ class Assistant:
         self._speech_thread.join(timeout=RESPONSE_TIMEOUT_S)
 
 
-def build_client(api_key: str, args: argparse.Namespace, detector: WakeWordDetector, rate: int):
-    client = RealTimeTranscriber(
-        RealTimeTranscriberOptions(terminate_timeout=TERMINATE_TIMEOUT_S),
-        api_key=api_key,
-    )
-    parameters = RealTimeParameters(
-        sample_rate=rate,
-        encoding=Encoding.pcm_s16le,
-        speech_model=args.speech_model,
-        language_codes=[args.language_code],
-        format_turns=True,
-        keyterms_prompt=detector.keyterms() + args.keyterms,
-    )
-    return client, parameters
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list-devices", action="store_true", help="show audio devices and exit")
@@ -230,18 +203,20 @@ def main() -> None:
     parser.add_argument("--voice", default="en", help="espeak-ng voice, e.g. 'en-gb'")
     parser.add_argument("--words-per-minute", type=int, default=165)
     parser.add_argument("--piper-model", help="path to a piper .onnx voice model")
-    parser.add_argument("--speech-model", default="universal-streaming-english")
-    parser.add_argument("--language-code", default="en")
+    parser.add_argument("--provider", default=PROVIDERS[0], choices=PROVIDERS)
+    parser.add_argument(
+        "--model",
+        "--speech-model",
+        dest="model",
+        help="recognition model (default: nova-3 / universal-streaming-english)",
+    )
+    parser.add_argument("--language", "--language-code", dest="language", default="en")
     parser.add_argument("--keyterms", nargs="*", default=[], help="extra words to bias recognition")
     args = parser.parse_args()
 
     if args.list_devices:
         list_devices()
         return
-
-    api_key = os.environ.get("ASSEMBLYAI_API_KEY")
-    if not api_key:
-        raise SystemExit("ASSEMBLYAI_API_KEY is not set.")
 
     detector = WakeWordDetector(
         phrases=tuple(args.wake_words or (DEFAULT_PHRASE,)),
@@ -263,37 +238,31 @@ def main() -> None:
 
     device = resolve_device(args.device)
     sample_rate = args.sample_rate or pick_sample_rate(device)
-    client, parameters = build_client(api_key, args, detector, sample_rate)
+    transcriber = build_transcriber(
+        provider=args.provider,
+        sample_rate=sample_rate,
+        model=args.model,
+        language=args.language,
+        keyterms=detector.keyterms() + args.keyterms,
+    )
 
-    def on_begin(_client: RealTimeTranscriber, event: BeginEvent) -> None:
-        phrases = ", ".join(repr(phrase) for phrase in detector.keyterms())
-        print(f"[session {event.id}] say {phrases} — Ctrl+C to stop\n", flush=True)
-
-    def on_turn(_client: RealTimeTranscriber, event: TurnEvent) -> None:
-        if not event.transcript:
-            return
-        if event.end_of_turn:
-            print(f"\r\033[K{event.transcript}", flush=True)
-            assistant.handle_turn(event.transcript)
+    def on_turn(turn: Turn) -> None:
+        if turn.end_of_turn:
+            print(f"\r\033[K{turn.transcript}", flush=True)
+            assistant.handle_turn(turn.transcript)
         else:
-            print(f"\r\033[K… {event.transcript}", end="", flush=True)
-
-    def on_terminated(_client: RealTimeTranscriber, event: TerminationEvent) -> None:
-        print(f"\n[session ended — {event.audio_duration_seconds}s of audio]", flush=True)
-
-    def on_error(_client: RealTimeTranscriber, error: RealTimeError) -> None:
-        print(f"[error] {error}", file=sys.stderr, flush=True)
-
-    client.on(RealTimeEvents.Begin, on_begin)
-    client.on(RealTimeEvents.Turn, on_turn)
-    client.on(RealTimeEvents.Termination, on_terminated)
-    client.on(RealTimeEvents.Error, on_error)
+            print(f"\r\033[K… {turn.transcript}", end="", flush=True)
 
     signal.signal(signal.SIGINT, lambda *_: assistant.shutdown())
     signal.signal(signal.SIGTERM, lambda *_: assistant.shutdown())
 
+    phrases = ", ".join(repr(phrase) for phrase in detector.keyterms())
+    print(
+        f"[{transcriber.name} {transcriber.model} @ {sample_rate} Hz] "
+        f"say {phrases} — Ctrl+C to stop\n",
+        flush=True,
+    )
     assistant.start()
-    client.connect(parameters)
     try:
         stream = sd.RawInputStream(
             samplerate=sample_rate,
@@ -304,9 +273,9 @@ def main() -> None:
             callback=assistant.audio_callback,
         )
         with stream:
-            client.stream(assistant.audio_chunks())
+            transcriber.stream(assistant.audio_chunks(), on_turn)
     finally:
-        client.disconnect(terminate=True)
+        transcriber.close()
         assistant.finish()
 
 

@@ -20,7 +20,7 @@ echo "Detected ALSA playback devices:"
 aplay -l || true
 echo
 echo "Next:"
-echo "  export ASSEMBLYAI_API_KEY=<your-key>"
+echo "  export DEEPGRAM_API_KEY=<your-key>   # or ASSEMBLYAI_API_KEY with --provider assemblyai"
 echo "  ./.venv/bin/python transcribe_mic.py --list-devices"
 echo "  ./.venv/bin/python transcribe_mic.py --device USB"
 echo "  ./.venv/bin/python voice_assistant.py --device USB --speaker USB"
